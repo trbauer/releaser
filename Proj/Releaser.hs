@@ -121,7 +121,8 @@ run as = do
       pc <-
         case reads fstr of
           [(pc,sfx)] -> return pc
-          _ -> fatal $ "parse error reading config file: \n" ++ fstr
+          [] -> fatal $ "parse error reading config file:\n" ++ fstr
+          _ -> fatal $ "parse error reading config file (ambiguous):\n" ++ fstr
       runRelease ro pc
 
 initRelease :: ROpts -> IO ()
@@ -250,7 +251,7 @@ runRelease ro pc = do
       Right r -> return r
   problemIf (not (null (cabal_ver)) && cabal_ver /= hs_ver) $
     "mismatch between cabal version and project version; " ++
-    "did you bump both? (cabal "++ show cabal_ver ++ " vs " ++ show hs_ver ++ " )"
+    "did you bump both? (cabal "++ show cabal_ver ++ " vs version file " ++ show hs_ver ++ " )"
   problemIf (hs_ver_date /= today) "release date in version file is not today"
 
   -- ensure repos are up to date
@@ -305,7 +306,7 @@ runRelease ro pc = do
     if not z then problem $ "target directory " ++ targ_dir ++ " doesn't exist"
       else do
         verboseLn $ "COPYING " ++ pcExePath pc ++ " to ARCHIVE " ++ (targ_dir </> "")
-        whenNoDryRun $ copyFile (pcExePath pc) targ_dir
+        whenNoDryRun $ copyFile (pcExePath pc) (targ_dir </> takeFileName (pcExePath pc))
 
   forM_ (pcProjectArchive pc) $ \targ_dir -> do
     z <- doesDirectoryExist targ_dir
@@ -314,9 +315,9 @@ runRelease ro pc = do
         let exe = dropExtension (takeFileName (pcExePath pc))
             ext = takeExtension (pcExePath pc)
             versioned_exe = exe ++ "-" ++ verToStr hs_ver ++ ext
-            target = targ_dir </> versioned_exe
-        verboseLn $ "COPYING " ++ pcExePath pc ++ " to ARCHIVE " ++ target
-        whenNoDryRun $ copyFile (pcExePath pc) target
+            target_exe = targ_dir </> versioned_exe
+        verboseLn $ "COPYING " ++ pcExePath pc ++ " to ARCHIVE " ++ target_exe
+        whenNoDryRun $ copyFile (pcExePath pc) target_exe
   return ()
 
 -- finds the version in the soruce file
