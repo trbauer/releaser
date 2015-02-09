@@ -1,5 +1,7 @@
 module Proj.Releaser where
 
+import Proj.Version
+
 import Control.Applicative
 import Control.Monad
 import Data.Char
@@ -76,6 +78,7 @@ parseROpts ro (a:as)
   | a`elem`["-c","--clobber"] = parseROpts (ro {roClobber = True}) as
   | a`elem`["-t","--dry-run"] = parseROpts (ro {roDryRun = True}) as
   | a`elem`["-v","--verbose"] = parseROpts (ro {roVerbose = True}) as
+  | a`elem`["-V","--version"] = putStrLn (vERSION ++ "(" ++ vERSION_DATE ++ ")") >> exitSuccess
   | take 1 a == "-" = badArg a "unrecognized option"
   | not (null (roConfig ro)) = badArg a ("config file already specified as " ++ roConfig ro)
   | otherwise = parseROpts (ro {roConfig = a}) as
