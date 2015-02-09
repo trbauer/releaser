@@ -1,0 +1,2 @@
+# releaser
+Project release script
