@@ -25,9 +25,15 @@ data ProjectConfig =
   , pcExePath :: FilePath -- e.g. dist/foo.exe (the target built)
   , pcExeTargetDirs :: [FilePath] -- z:\users\trbauer ...
   , pcProjectArchive :: [FilePath] -- ...
+  , pcStrip :: !Bool
   } deriving (Show,Read)
-data Repo = Mercurial | Git deriving (Show,Read)
-dftProjectConfig = ProjectConfig [] vERSION_FILE "project.cabal" "my.exe" [] []
+
+data Repo = Mercurial | Git deriving (Show,Read,Eq)
+repoExe :: Repo -> String
+repoExe Mercurial = "hg"
+repoExe Git       = "git"
+repoDir r = "." ++ repoExe r
+
 
 vERSION_FILE = "Version.hs"
 vERSION_FIELD = "(vERSION,vERSION_DATE)"
@@ -160,9 +166,9 @@ initRelease ro = do
       _   -> chooseConfig "pcCabalFile" "" "ambiguous / multiple .cabal found"
 
   -- find the repos (e.g. .hg or .git)
-  has_hg <- doesDirectoryExist ".hg"
+  has_hg <- doesDirectoryExist (repoDir Mercurial)
   let repo_hg = if has_hg then [Mercurial] else []
-  has_git <- doesDirectoryExist ".git"
+  has_git <- doesDirectoryExist (repoDir Git)
   let repo_git = if has_git then [Git] else []
   repos <-
     if (not (null repo_hg) && not (null repo_git))
@@ -212,21 +218,9 @@ initRelease ro = do
       return a
 
   -- write the result out
-  let output = fmtProjectConfig $ ProjectConfig repos cabal_file version_file exe_name [] archv
+  let output = fmtProjectConfig $ ProjectConfig repos cabal_file version_file exe_name [] archv True
   if roDryRun ro then putStr $ "TEST ONLY: we'd write to " ++ cfg_file ++ " the following:\n" ++ output
     else writeFile cfg_file output
-
-findCabalExecutables :: FilePath -> IO [String]
-findCabalExecutables fp = concatMap findExecLine <$> readFileLines fp
-  where findExecLine :: String -> [String]
-        findExecLine ln =
-            case splitAt (length exec_str) ln of
-              (_,"") -> []
-              (pfx,sfx)
-                | pfx == exec_str && isSpace (head sfx) -> [trimWs sfx]
-                | otherwise -> []
-          where exec_str = "executable"
-
 
 
 
@@ -235,7 +229,7 @@ runRelease ro pc = do
   today <- getDateString
   let has_cabal = not (null (pcCabalFile pc))
       not_dry_run = not (roDryRun ro)
-      whenNoDryRun = when not_dry_run
+      whenNotDryRun = when not_dry_run
       verboseLn = if roVerbose ro then putStrLn else const (return ())
       problem msg
         | roClobber ro || roDryRun ro = warningLn ("WARNING: " ++ msg)
@@ -256,10 +250,7 @@ runRelease ro pc = do
 
   -- ensure repos are up to date
   forM_ (pcRepos pc) $ \r -> do
-    let rcs_exe =
-          case r of
-            Mercurial -> "hg"
-            Git       -> "git"
+    let rcs_exe = repoExe r
     (ec,out,err) <- exec rcs_exe ["diff"]
     problemIf (not (null out)) $ "outstanding changes in " ++ rcs_exe ++ " repository"
     problemIf (ec /= 0) $ "(" ++ rcs_exe ++ " diff) exited " ++ show ec
@@ -299,25 +290,46 @@ runRelease ro pc = do
   z <- doesFileExist (pcExePath pc)
   when (not z && not_dry_run) $
     problem $ "no executable found at " ++ pcExePath pc ++ " (after build)"
+  when (pcStrip pc && z) $ do
+    putStrLn $ "[strip " ++ pcExePath pc ++ "]"
+    when (not (roDryRun ro)) $ do
+      exec0 "strip"  [pcExePath pc]
+      return ()
+
+  let copy src dst = do
+        verboseLn $ "COPYING " ++ src ++ " to " ++ dst
+        whenNotDryRun $ copyFile src dst
 
   -- install the executable
   forM_ (pcExeTargetDirs pc) $ \targ_dir -> do
     z <- doesDirectoryExist targ_dir
     if not z then problem $ "target directory " ++ targ_dir ++ " doesn't exist"
       else do
-        verboseLn $ "COPYING " ++ pcExePath pc ++ " to ARCHIVE " ++ (targ_dir </> "")
-        whenNoDryRun $ copyFile (pcExePath pc) (targ_dir </> takeFileName (pcExePath pc))
+        let target= targ_dir </> takeFileName (pcExePath pc)
+        copy (pcExePath pc) target
 
+  -- archive things (repo and versioned executables)
+  let exe = dropExtension (takeFileName (pcExePath pc))
+      ext = takeExtension (pcExePath pc)
+      versioned_exe = exe ++ "-" ++ verToStr hs_ver ++ ext
+      archive_gz = dropExtension versioned_exe ++ ".tar.gz"
+      save_repo = Mercurial `elem` pcRepos pc && not (null (pcProjectArchive pc))
+  when save_repo $ do
+    let arch_msg = "[hg archive " ++ archive_gz ++ "]"
+    putStrLn arch_msg
+    whenNotDryRun $ do
+      out <- exec0 "hg" ["archive",archive_gz]
+      putStrLn $ labelLines (arch_msg ++ " ") out
   forM_ (pcProjectArchive pc) $ \targ_dir -> do
     z <- doesDirectoryExist targ_dir
-    if not z then problem $ "archive directory " ++ targ_dir ++ " doesn't exist"
-      else do
-        let exe = dropExtension (takeFileName (pcExePath pc))
-            ext = takeExtension (pcExePath pc)
-            versioned_exe = exe ++ "-" ++ verToStr hs_ver ++ ext
-            target_exe = targ_dir </> versioned_exe
-        verboseLn $ "COPYING " ++ pcExePath pc ++ " to ARCHIVE " ++ target_exe
-        whenNoDryRun $ copyFile (pcExePath pc) target_exe
+    if not z
+      then problem $ "archive directory " ++ targ_dir ++ " doesn't exist"
+      else when save_repo $ do
+             copy archive_gz (targ_dir </> archive_gz)
+             copy (pcExePath pc) (targ_dir </> versioned_exe)
+  when save_repo $ do
+    verboseLn $ "removing " ++ archive_gz ++ " (done copying)"
+    whenNotDryRun $ removeFile archive_gz
   return ()
 
 -- finds the version in the soruce file
@@ -361,6 +373,18 @@ findCabalVersionInLines lns = do
       where vstr = trimWs (drop (length ver_key) vln)
     [] -> fatal "failed to find version in cabal file"
     _ -> fatal "multiple versions found in cabal file"
+
+-- lists 'executable' rules in a .cabal
+findCabalExecutables :: FilePath -> IO [String]
+findCabalExecutables fp = concatMap findExecLine <$> readFileLines fp
+  where findExecLine :: String -> [String]
+        findExecLine ln =
+            case splitAt (length exec_str) ln of
+              (_,"") -> []
+              (pfx,sfx)
+                | pfx == exec_str && isSpace (head sfx) -> [trimWs sfx]
+                | otherwise -> []
+          where exec_str = "executable"
 
 
 type Version = [Int]
@@ -421,6 +445,7 @@ exec0 exe args = do
     exitFailure
   return out
 
+labelLines :: String -> String -> String
 labelLines pfx = unlines . map (pfx++) . lines
 
 getDateString :: IO String
