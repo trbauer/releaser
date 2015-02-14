@@ -49,6 +49,7 @@ fmtProjectConfig pc =
   fmtField "pcExePath" pcExePath ++
   fmtField "pcExeTargetDirs" pcExeTargetDirs ++
   fmtField "pcProjectArchive" pcProjectArchive ++
+  fmtField "pcStrip" pcStrip ++
   "}\n"
   where fmtField0 nm f = "    " ++ nm ++ " = " ++ show (f pc) ++ "\n"
         fmtField  nm f = "  , " ++ nm ++ " = " ++ show (f pc) ++ "\n"
@@ -324,9 +325,10 @@ runRelease ro pc = do
     z <- doesDirectoryExist targ_dir
     if not z
       then problem $ "archive directory " ++ targ_dir ++ " doesn't exist"
-      else when save_repo $ do
-             copy archive_gz (targ_dir </> archive_gz)
-             copy (pcExePath pc) (targ_dir </> versioned_exe)
+      else if save_repo then do
+       copy archive_gz (targ_dir </> archive_gz)
+       copy (pcExePath pc) (targ_dir </> versioned_exe)
+       else verboseLn $ "cannot save repo, repo is not mercurial"
   when save_repo $ do
     verboseLn $ "removing " ++ archive_gz ++ " (done copying)"
     whenNotDryRun $ removeFile archive_gz
