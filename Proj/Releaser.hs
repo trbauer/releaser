@@ -22,7 +22,7 @@ data ProjectConfig =
     pcRepos :: ![Repo]
   , pcCabalFile :: FilePath -- project.cabal
   , pcVersionFile :: FilePath -- Version.hs (we look for (vERSION, vERSION_DATE))
-  , pcExePath :: FilePath -- e.g. dist/foo.exe (the target built)
+  , pcExePaths :: [FilePath] -- e.g. dist/foo.exe (the target built)
   , pcExeTargetDirs :: [FilePath] -- z:\users\trbauer ...
   , pcProjectArchive :: [FilePath] -- ...
   , pcStrip :: !Bool
@@ -46,7 +46,7 @@ fmtProjectConfig pc =
   fmtField "pcCabalFile" pcCabalFile ++
   fmtField "pcVersionFile" pcVersionFile ++
 --  fmtField "pcVersionField" pcVersionField ++
-  fmtField "pcExePath" pcExePath ++
+  fmtField "pcExesPath" pcExePaths ++
   fmtField "pcExeTargetDirs" pcExeTargetDirs ++
   fmtField "pcProjectArchive" pcProjectArchive ++
   fmtField "pcStrip" pcStrip ++
@@ -219,7 +219,7 @@ initRelease ro = do
       return a
 
   -- write the result out
-  let output = fmtProjectConfig $ ProjectConfig repos cabal_file version_file exe_name [] archv True
+  let output = fmtProjectConfig $ ProjectConfig repos cabal_file version_file [exe_name] [] archv True
   if roDryRun ro then putStr $ "TEST ONLY: we'd write to " ++ cfg_file ++ " the following:\n" ++ output
     else writeFile cfg_file output
 
@@ -257,45 +257,49 @@ runRelease ro pc = do
     problemIf (ec /= 0) $ "(" ++ rcs_exe ++ " diff) exited " ++ show ec
 
   -- ensure the target directories exist
-  let exe = dropExtension (takeFileName (pcExePath pc)) -- "foo/bar/baz.exe" -> "baz"
-  forM_ (pcExeTargetDirs pc) $ \dir -> do
-    verboseLn $ "ensuring exe target dir exists: " ++ show dir
-    z <- doesDirectoryExist dir
-    problemIf (not z) $ "exe target installation dir " ++ dir ++ " does not exist"
+  forM_ (pcExePaths pc) $ \exe -> do
+    let exe = dropExtension (takeFileName exe) -- "foo/bar/baz.exe" -> "baz"
+    forM_ (pcExeTargetDirs pc) $ \dir -> do
+      verboseLn $ "ensuring exe target dir exists: " ++ show dir
+      z <- doesDirectoryExist dir
+      problemIf (not z) $ "exe target installation dir " ++ dir ++ " does not exist"
 
-  -- ensure the version is bumped (by using an archive)
-  forM_ (pcProjectArchive pc) $ \dir -> do
-    verboseLn $ "checking archive target dir for version >= " ++ hs_ver_date
-    z <- doesDirectoryExist dir
-    if not z
-      then problem $ "archive dir " ++ dir ++ " doesn't exist"
-      else do
-        fs <- getDirectoryContents dir
-        case maxVersionedExe exe fs of
-          [] -> return () -- not present
-          v
-            | v >= hs_ver -> problem "archive has version >= this version already"
-            | otherwise -> return ()
+    -- ensure the version is bumped (by using an archive)
+    forM_ (pcProjectArchive pc) $ \dir -> do
+      verboseLn $ "checking archive target dir for version >= " ++ hs_ver_date
+      z <- doesDirectoryExist dir
+      if not z
+        then problem $ "archive dir " ++ dir ++ " doesn't exist"
+        else do
+          fs <- getDirectoryContents dir
+          case maxVersionedExe exe fs of
+            [] -> return () -- not present
+            v
+              | v >= hs_ver -> problem "archive has version >= this version already"
+              | otherwise -> return ()
+
   problemIf (today /= hs_ver_date) $ "mismatch of version date " ++ hs_ver_date ++ " vs today"
 
   -- build the file (ensure it exists afterwards)
-  z <- doesFileExist (pcExePath pc)
-  when (z && not_dry_run) $
-    removeFile (pcExePath pc)
+  forM_ (pcExePaths pc) $ \exe -> do
+    z <- doesFileExist exe
+    when (z && not_dry_run) $
+      removeFile exe
   when has_cabal $ do
     putStrLn "[cabal build]"
     when (not (roDryRun ro)) $ do
       out <- exec0 "cabal" ["build"]
       verboseLn (labelLines ("[cabal build] ") out)
 
-  z <- doesFileExist (pcExePath pc)
-  when (not z && not_dry_run) $
-    problem $ "no executable found at " ++ pcExePath pc ++ " (after build)"
-  when (pcStrip pc && z) $ do
-    putStrLn $ "[strip " ++ pcExePath pc ++ "]"
-    when (not (roDryRun ro)) $ do
-      exec0 "strip"  [pcExePath pc]
-      return ()
+  forM_ (pcExePaths pc) $ \exe -> do
+    z <- doesFileExist exe
+    when (not z && not_dry_run) $
+      problem $ "no executable found at " ++ exe ++ " (after build)"
+    when (pcStrip pc && z) $ do
+      putStrLn $ "[strip " ++ exe ++ "]"
+      when (not (roDryRun ro)) $ do
+        exec0 "strip"  [exe]
+        return ()
 
   let copy src dst = do
         verboseLn $ "COPYING " ++ src ++ " to " ++ dst
@@ -306,12 +310,13 @@ runRelease ro pc = do
     z <- doesDirectoryExist targ_dir
     if not z then problem $ "target directory " ++ targ_dir ++ " doesn't exist"
       else do
-        let target= targ_dir </> takeFileName (pcExePath pc)
-        copy (pcExePath pc) target
+        forM_ (pcExePaths pc) $ \exe -> do
+          let target= targ_dir </> takeFileName exe
+          copy exe target
 
   -- archive things (repo and versioned executables)
-  let exe = dropExtension (takeFileName (pcExePath pc))
-      ext = takeExtension (pcExePath pc)
+  let exe = dropExtension (takeFileName (head (pcExePaths pc)))
+      ext = takeExtension (head (pcExePaths pc))
       versioned_exe = exe ++ "-" ++ verToStr hs_ver ++ ext
       archive_gz = dropExtension versioned_exe ++ ".tar.gz"
       save_repo = Mercurial `elem` pcRepos pc && not (null (pcProjectArchive pc))
@@ -329,7 +334,9 @@ runRelease ro pc = do
         if save_repo
           then copy archive_gz (targ_dir </> archive_gz)
           else verboseLn $ "cannot save repo, repo is not mercurial"
-        copy (pcExePath pc) (targ_dir </> versioned_exe)
+        forM_ (pcExePaths pc) $ \exe -> do
+          let versioned_exe = dropExtension (takeFileName exe) ++ "-" ++ verToStr hs_ver ++ takeExtension exe
+          copy exe (targ_dir </> versioned_exe)
 
   when save_repo $ do
     verboseLn $ "removing " ++ archive_gz ++ " (done copying)"
