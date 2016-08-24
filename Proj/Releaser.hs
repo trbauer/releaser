@@ -3,8 +3,10 @@ module Proj.Releaser where
 import Proj.Version
 
 import Control.Applicative
+import Control.Exception
 import Control.Monad
 import Data.Char
+import Data.IORef
 import Data.List
 import Data.Time.Calendar
 import Data.Time.Clock
@@ -130,7 +132,8 @@ run as = do
           [(pc,sfx)] -> return pc
           [] -> fatal $ "parse error reading config file:\n" ++ fstr
           _ -> fatal $ "parse error reading config file (ambiguous):\n" ++ fstr
-      runRelease ro pc
+      z <- runRelease ro pc
+      if z then exitSuccess else exitFailure
 
 initRelease :: ROpts -> IO ()
 initRelease ro = do
@@ -225,8 +228,9 @@ initRelease ro = do
 
 
 
-runRelease :: ROpts -> ProjectConfig -> IO ()
+runRelease :: ROpts -> ProjectConfig -> IO Bool
 runRelease ro pc = do
+  ior_success <- newIORef True
   today <- getDateString
   let has_cabal = not (null (pcCabalFile pc))
       not_dry_run = not (roDryRun ro)
@@ -303,7 +307,12 @@ runRelease ro pc = do
 
   let copy src dst = do
         verboseLn $ "COPYING " ++ src ++ " to " ++ dst
-        whenNotDryRun $ copyFile src dst
+        let handler :: SomeException -> IO ()
+            handler e = do
+              writeIORef ior_success False
+              hPutStrLn stderr ("COPYING " ++ src ++ " to " ++ dst ++ ":\n" ++ show e)
+        whenNotDryRun $
+          copyFile src dst `catch` handler
 
   -- install the executable
   forM_ (pcExeTargetDirs pc) $ \targ_dir -> do
@@ -319,13 +328,19 @@ runRelease ro pc = do
       ext = takeExtension (head (pcExePaths pc))
       versioned_exe = exe ++ "-" ++ verToStr hs_ver ++ ext
       archive_gz = dropExtension versioned_exe ++ ".tar.gz"
-      save_repo = Mercurial `elem` pcRepos pc && not (null (pcProjectArchive pc))
+      save_repo = not (null (pcProjectArchive pc))
   when save_repo $ do
-    let arch_msg = "[hg archive " ++ archive_gz ++ "]"
-    putStrLn arch_msg
-    whenNotDryRun $ do
-      out <- exec0 "hg" ["archive",archive_gz]
-      putStrLn $ labelLines (arch_msg ++ " ") out
+    forM_ (pcRepos pc) $ \r -> do
+      let arch_msg = "[" ++ repoExe r ++ " archive " ++ archive_gz ++ "]"
+      putStrLn arch_msg
+      whenNotDryRun $ do
+        out <-
+          case r of
+            Mercurial -> do
+              exec0 (repoExe r) ["archive",archive_gz]
+            Git -> do
+              exec0 (repoExe r) ["archive","--format=tar.gz","-o",archive_gz,"HEAD"]
+        putStrLn $ labelLines (arch_msg ++ " ") out
   forM_ (pcProjectArchive pc) $ \targ_dir -> do
     z <- doesDirectoryExist targ_dir
     if not z
@@ -341,7 +356,8 @@ runRelease ro pc = do
   when save_repo $ do
     verboseLn $ "removing " ++ archive_gz ++ " (done copying)"
     whenNotDryRun $ removeFile archive_gz
-  return ()
+
+  readIORef ior_success
 
 -- finds the version in the soruce file
 findProjectVersion :: FilePath -> IO (Either String (Version,String))
